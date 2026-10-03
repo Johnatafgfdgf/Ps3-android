@@ -1,0 +1,78 @@
+name: Android quality gate
+
+on:
+  push:
+    branches:
+      - main
+      - production-mobile-v1
+    paths:
+      - "android/**"
+      - "Utilities/**"
+      - "rpcs3/**"
+      - ".github/workflows/android-quality.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - "Utilities/**"
+      - "rpcs3/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Production policy checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x android/gradlew
+          grep -q 'android:allowBackup="false"' android/app/src/main/AndroidManifest.xml
+          grep -q 'isMinifyEnabled = true' android/app/build.gradle.kts
+          grep -q 'CMAKE_BUILD_TYPE=Release' android/app/build.gradle.kts
+          if grep -n 'debug.keystore' android/app/build.gradle.kts; then
+            echo "Release configuration must never reference debug.keystore"
+            exit 1
+          fi
+          git diff --check HEAD^
+
+      - name: Unit tests
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace :app:testStandardDebugUnitTest
+
+      - name: Android lint
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace :app:lintStandardDebug
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-quality-reports
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/reports/lint-results-*.html
+            android/app/build/reports/lint-results-*.xml
+          if-no-files-found: ignore
