@@ -149,6 +149,17 @@ android {
     }
 }
 
+androidComponents {
+    // The vendor-ID flavors are retained only for developer experiments.
+    // Consumer release artifacts must use our own application identity.
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        val branding = variant.productFlavors.firstOrNull { it.first == "branding" }?.second
+        if (branding != "standard") {
+            variant.enable = false
+        }
+    }
+}
+
 base.archivesName = "ps3native"
 
 dependencies {
