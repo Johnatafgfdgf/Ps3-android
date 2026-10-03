@@ -1153,13 +1153,15 @@ public:
         nextWorkTag.wait(lastProcessedTag);
       }
 
-      if (nextWorkTagValue == lastProcessedTag || queue.empty()) {
+      if (nextWorkTagValue == lastProcessedTag) {
         continue;
       }
 
       CompilationWorkload workload;
 
       {
+        // queue is not atomic: every observation must stay under queueMutex.
+        // Reading queue.empty() outside this lock was a C++ data race.
         std::lock_guard lock(queueMutex);
 
         if (queue.empty()) {
@@ -1723,15 +1725,27 @@ Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
 
   static std::unique_ptr<logs::listener> log_file;
   {
-    // Check free space
     fs::device_stat stats{};
-    if (!fs::statfs(fs::get_cache_dir(), stats) ||
-        stats.avail_free < 128 * 1024 * 1024) {
-      std::fprintf(stderr, "Not enough free space for logs (%f KB)",
-                   stats.avail_free / 1000000.);
+    constexpr std::uint64_t kMiB = 1024ull * 1024ull;
+    constexpr std::uint64_t kDefaultLogLimit = 16ull * kMiB;
+    constexpr std::uint64_t kMaxLogLimit = 64ull * kMiB;
+
+    std::uint64_t log_limit = kDefaultLogLimit;
+    if (fs::statfs(fs::get_cache_dir(), stats)) {
+      if (stats.avail_free < 128ull * kMiB) {
+        std::fprintf(stderr, "Low free space for logs (%f MB)",
+                     stats.avail_free / static_cast<double>(kMiB));
+      }
+
+      // Keep diagnostics useful without allowing verbose logs to consume
+      // gigabytes of user storage or create avoidable I/O pressure.
+      log_limit = std::clamp<std::uint64_t>(
+          stats.avail_free / 64, kDefaultLogLimit, kMaxLogLimit);
+    } else {
+      rpcs3_android.warning("Unable to query free space for log sizing");
     }
 
-    // preserve old log file
+    // Preserve one previous log for crash diagnostics.
     if (std::filesystem::exists(fs::get_log_dir() + "RPCS3.log")) {
       std::error_code ec;
       std::filesystem::remove(fs::get_log_dir() + "RPCS3.old.log", ec);
@@ -1739,9 +1753,8 @@ Java_net_rpcs3_RPCS3_initialize(JNIEnv *env, jobject, jstring rootDir) {
                               fs::get_log_dir() + "RPCS3.old.log", ec);
     }
 
-    // Limit log size to ~25% of free space
     log_file = logs::make_file_listener(fs::get_log_dir() + "RPCS3.log",
-                                        stats.avail_free / 4);
+                                        log_limit);
   }
 
   logs::stored_message ver{rpcs3_android.always()};
