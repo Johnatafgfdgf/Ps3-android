@@ -3996,14 +3996,48 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 			const auto& caps = get_arm_core_capacities();
 			u64 fast_mask = 0;
 			u64 slow_mask = 0;
-			u32 threshold = 0;
+
+			// cpu_capacity is ideal, but Android kernels that hide it fall back to
+			// maximum CPU frequency. A fixed percentage of the maximum is unreliable
+			// on SoCs whose efficiency cores clock close to the performance cluster.
+			// Split at the largest observed topology gap instead.
+			std::array<u32, 64> observed{};
+			usz observed_count = 0;
 
 			for (u32 core = 0; core < 64u; core++)
 			{
-				threshold = std::max(threshold, caps[core]);
+				if ((process_affinity_mask & (u64{1} << core)) && caps[core])
+				{
+					observed[observed_count++] = caps[core];
+				}
 			}
 
-			threshold = threshold * 3 / 4;
+			if (observed_count < 2)
+			{
+				return all_cores_mask;
+			}
+
+			std::sort(observed.begin(), observed.begin() + observed_count);
+
+			u32 split_low = 0;
+			u32 largest_gap = 0;
+
+			for (usz i = 1; i < observed_count; ++i)
+			{
+				const u32 gap = observed[i] - observed[i - 1];
+				if (gap > largest_gap)
+				{
+					largest_gap = gap;
+					split_low = observed[i - 1];
+				}
+			}
+
+			if (!largest_gap)
+			{
+				return all_cores_mask;
+			}
+
+			const u32 threshold = split_low + (largest_gap + 1) / 2;
 
 			for (u32 core = 0; core < 64u; core++)
 			{
