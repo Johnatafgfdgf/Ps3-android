@@ -636,21 +636,25 @@ fun GamesScreen(
         onRefresh = {
             if (gameInProgress == null) {
                 isRefreshing.value = true
-                thread {
+                coroutineScope.launch {
                     val roots = listOf(
                         RPCS3.rootDirectory + "/config/dev_hdd0/game",
                         RPCS3.rootDirectory + "/config/games"
                     )
 
-                    GameRepository.beginScan()
-                    try {
-                        roots.forEach { RPCS3.instance.collectGameInfo(it, -1) }
-                        FolderGames.restore()
-                    } finally {
-                        GameRepository.endScan(roots)
+                    withContext(Dispatchers.IO) {
+                        GameRepository.beginScan()
+                        try {
+                            roots.forEach { RPCS3.instance.collectGameInfo(it, -1) }
+                            FolderGames.restore()
+                        } finally {
+                            GameRepository.endScan(roots)
+                        }
                     }
 
-                    Thread.sleep(300)
+                    // Keep the spinner visible long enough to avoid a one-frame flash
+                    // on tiny libraries, while updating Compose state on Main.
+                    kotlinx.coroutines.delay(150)
                     isRefreshing.value = false
                 }
             }
