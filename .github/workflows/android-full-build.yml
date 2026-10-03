@@ -65,7 +65,12 @@ jobs:
             manager=$(find "$sdk" -type f -name sdkmanager 2>/dev/null | head -1)
           fi
           test -n "$manager"
-          yes | "$manager" --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+          # Accept licenses independently so pipefail cannot turn the normal
+          # early exit of sdkmanager into a false failure via "yes: Broken pipe".
+          yes | "$manager" --licenses > /dev/null 2>&1 || true
+          "$manager" --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}"
+          test -d "$sdk/ndk/${NDK_VERSION}"
+          test -d "$sdk/cmake/${CMAKE_VERSION}"
           echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$sdk/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
