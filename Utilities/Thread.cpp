@@ -3892,8 +3892,10 @@ void thread_ctrl::detect_cpu_layout()
 u64 thread_ctrl::get_affinity_mask(thread_class group)
 {
 #ifdef ANDROID
-	u64 mask = 0;
-	thread_class affinities[] =
+	// Manual per-core affinity remains an explicit override. When every entry is
+	// left at the default "General" value, fall through to the heterogeneous ARM
+	// scheduler below instead of pinning every emulation class to every core.
+	const thread_class affinities[] =
 	{
 		g_cfg.core.affinity.cpu0.get(),
 		g_cfg.core.affinity.cpu1.get(),
@@ -3905,20 +3907,46 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 		g_cfg.core.affinity.cpu7.get()
 	};
 
-	for (std::size_t i = 0; i < std::min<std::size_t>(std::thread::hardware_concurrency(), std::size(affinities)); ++i)
+	bool has_manual_affinity = false;
+	for (const thread_class affinity : affinities)
 	{
-		if (affinities[i] == group || affinities[i] == thread_class::general)
+		if (affinity != thread_class::general)
 		{
-			mask |= 1ull << i;
+			has_manual_affinity = true;
+			break;
 		}
 	}
 
-	for (std::size_t i = std::size(affinities); i < std::thread::hardware_concurrency(); ++i)
+	if (has_manual_affinity)
 	{
-		mask |= 1ull << i;
-	}
+		u64 mask = 0;
+		const usz concurrency = std::thread::hardware_concurrency();
+		const usz configured = std::min<usz>(concurrency, std::size(affinities));
 
-	return mask;
+		for (usz i = 0; i < configured; ++i)
+		{
+			if (affinities[i] == group || affinities[i] == thread_class::general)
+			{
+				mask |= 1ull << i;
+			}
+		}
+
+		// Devices with more than eight logical CPUs cannot be fully represented by
+		// the current UI, so leave the extra cores available rather than silently
+		// starving a workload.
+		for (usz i = std::size(affinities); i < std::min<usz>(concurrency, 64); ++i)
+		{
+			mask |= 1ull << i;
+		}
+
+		mask &= get_process_affinity_mask();
+		if (mask)
+		{
+			return mask;
+		}
+
+		sig_log.warning("Android affinity override produced an empty mask for %s; using automatic scheduling.", group);
+	}
 #endif
 
 	detect_cpu_layout();
@@ -3994,7 +4022,9 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 			case thread_class::rsx:
 				return fast_mask;
 			case thread_class::ppu:
-				return all_cores_mask;
+				// PPU latency matters more than aggregate throughput. Keeping it on
+				// performance cores avoids migrations to LITTLE cores on mobile SoCs.
+				return fast_mask;
 			default:
 				return slow_mask;
 			}
