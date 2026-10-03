@@ -6,6 +6,14 @@ plugins {
     id("kotlin-parcelize")
 }
 
+val releaseKeystorePath = System.getenv("KEYSTORE_PATH").orEmpty()
+val releaseKeystoreAlias = System.getenv("KEYSTORE_ALIAS").orEmpty()
+val releaseKeystorePassword = System.getenv("KEYSTORE_PASSWORD").orEmpty()
+val releaseKeystoreFile = releaseKeystorePath.takeIf { it.isNotBlank() }?.let { file(it) }
+val hasReleaseSigning = releaseKeystoreFile?.isFile == true &&
+    releaseKeystoreAlias.isNotBlank() &&
+    releaseKeystorePassword.isNotBlank()
+
 android {
     namespace = "net.rpcs3"
     compileSdk = 35
@@ -36,41 +44,12 @@ android {
     }
 
     signingConfigs {
-        create("custom-key") {
-            val keystoreAlias = System.getenv("KEYSTORE_ALIAS") ?: ""
-            val keystorePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
-            val keystorePath = System.getenv("KEYSTORE_PATH") ?: ""
-
-            if (keystorePath.isNotEmpty() && file(keystorePath).exists() && file(keystorePath).length() > 0) {
-                keyAlias = keystoreAlias
-                keyPassword = keystorePassword
-                storeFile = file(keystorePath)
-                storePassword = keystorePassword
-            } else {
-                val debugKeystoreFile = file("${System.getProperty("user.home")}/debug.keystore")
-
-                println("⚠️ Custom keystore not found or empty! creating debug keystore.")
-
-                if (!debugKeystoreFile.exists()) {
-                    Runtime.getRuntime().exec(
-                        arrayOf(
-                            "keytool", "-genkeypair",
-                            "-v", "-keystore", debugKeystoreFile.absolutePath,
-                            "-storepass", "android",
-                            "-keypass", "android",
-                            "-alias", "androiddebugkey",
-                            "-keyalg", "RSA",
-                            "-keysize", "2048",
-                            "-validity", "10000",
-                            "-dname", "CN=Android Debug,O=Android,C=US"
-                        )
-                    ).waitFor()
-                }
-
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
-                storeFile = debugKeystoreFile
-                storePassword = "android"
+        if (hasReleaseSigning) {
+            create("release") {
+                keyAlias = releaseKeystoreAlias
+                keyPassword = releaseKeystorePassword
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
             }
         }
     }
@@ -110,11 +89,26 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            ndk {
+                // Keep symbols outside the shipped APK for actionable native crash reports.
+                debugSymbolLevel = "FULL"
+            }
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf("-DCMAKE_BUILD_TYPE=Release")
+                }
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("custom-key") ?: signingConfigs.getByName("debug")
+
+            // Never silently publish a release with Android's public debug key.
+            // CI can still build an unsigned release; distribution builds must
+            // provide the keystore through protected environment variables.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
