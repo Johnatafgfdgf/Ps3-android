@@ -15,6 +15,7 @@ import androidx.core.app.NotificationManagerCompat
 import net.rpcs3.dialogs.AlertDialogQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
 
 data class ProgressEntry(
     val value: MutableLongState = mutableLongStateOf(0),
@@ -41,8 +42,8 @@ private data class ProgressWithHandler(
 )
 
 class ProgressRepository {
-    private var progressHandlers = ConcurrentHashMap<Long, ProgressWithHandler>()
-    private var nextRequestId = 1L
+    private val progressHandlers = ConcurrentHashMap<Long, ProgressWithHandler>()
+    private val nextRequestId = AtomicLong(1L)
 
     companion object {
         private val instance = ProgressRepository()
@@ -61,19 +62,10 @@ class ProgressRepository {
         fun onProgressEvent(id: Long, value: Long, max: Long, message: String? = null): Boolean {
             val item = instance.progressHandlers[id] ?: return false
 
-            val previous = item.progressEntry.value
-            item.progressEntry.value = ProgressEntry(
-                mutableLongStateOf(value),
-                mutableLongStateOf(max),
-                mutableStateOf(message ?: previous.message.value)
-            )
-
-            item.handler(ProgressUpdateEntry(value, max, item.progressEntry.value.message.value))
-
-            if (item.progressEntry.value.isFinished()) {
-                cancel(id)
-            }
-
+            // JNI progress callbacks can arrive from native worker threads. Keep
+            // Compose snapshot state confined to the main looper and only enqueue
+            // immutable progress data here.
+            item.handler(ProgressUpdateEntry(value, max, message))
             return true
         }
 
@@ -91,7 +83,7 @@ class ProgressRepository {
             var requestId: Long
             val entry = ProgressWithHandler(handler, mutableStateOf(ProgressEntry()))
             while (true) {
-                requestId = instance.nextRequestId++
+                requestId = instance.nextRequestId.getAndIncrement()
                 if (instance.progressHandlers.put(requestId, entry) == null) {
                     break
                 }
@@ -117,7 +109,15 @@ class ProgressRepository {
             val asyncHandler = Handler.createAsync(Looper.getMainLooper()) { message ->
                 val value = message.data.getLong("value")
                 val max = message.data.getLong("max")
-                val text = message.data.getString("message")
+                val incomingText = message.data.getString("message")
+                val previousText = entry.progressEntry.value.message.value
+                val text = incomingText ?: previousText
+
+                entry.progressEntry.value = ProgressEntry(
+                    mutableLongStateOf(value),
+                    mutableLongStateOf(max),
+                    mutableStateOf(text)
+                )
 
                 if (hasPermission) {
                     val notificationManager = NotificationManagerCompat.from(context)
@@ -147,6 +147,11 @@ class ProgressRepository {
                 val update = ProgressUpdateEntry(value, max, text)
                 handler(update)
                 entry.listeners.forEach { it(update) }
+
+                if (update.isFinished()) {
+                    cancel(requestId)
+                }
+
                 true
             }
 
