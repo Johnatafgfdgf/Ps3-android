@@ -16,6 +16,20 @@ private const val GPU_DRIVER_META_FILE = "meta.json"
 private const val TAG = "GPUDriverHelper"
 
 object GpuDriverHelper {
+    private const val MAX_DRIVER_LABEL_LENGTH = 180
+
+    private fun isSafePathSegment(value: String): Boolean =
+        value.isNotBlank() &&
+            value.length <= MAX_DRIVER_LABEL_LENGTH &&
+            value != "." &&
+            value != ".." &&
+            '/' !in value &&
+            '\\' !in value &&
+            '\u0000' !in value
+
+    private fun isSafeLibraryName(value: String): Boolean =
+        isSafePathSegment(value) && value.endsWith(".so", ignoreCase = true)
+
     fun getInstalledDrivers(context: Context): Map<File, GpuDriverMetadata> {
         val gpuDriverDir = getDriversDirectory(context)
 
@@ -117,9 +131,24 @@ object GpuDriverHelper {
             return GpuDriverInstallResult.UnsupportedAndroidVersion
         }
 
+        if (!isSafePathSegment(driverMetadata.label) ||
+            !isSafeLibraryName(driverMetadata.libraryName) ||
+            !File(unpackDir, driverMetadata.libraryName).isFile
+        ) {
+            cleanup()
+            return GpuDriverInstallResult.InvalidMetadata
+        }
+
+        val driversRoot = getDriversDirectory(context).canonicalFile
+        val finalInstallDir = File(driversRoot, driverMetadata.label).canonicalFile
+
+        if (!finalInstallDir.path.startsWith(driversRoot.path + File.separator)) {
+            cleanup()
+            return GpuDriverInstallResult.InvalidMetadata
+        }
+
         val installedDrivers = getInstalledDrivers(context)
-        val finalInstallDir = File(getDriversDirectory(context), driverMetadata.label)
-        if (installedDrivers[finalInstallDir] != null) {
+        if (installedDrivers[finalInstallDir] != null || finalInstallDir.exists()) {
             cleanup()
             return GpuDriverInstallResult.AlreadyInstalled
         }
@@ -133,10 +162,24 @@ object GpuDriverHelper {
     }
 
     fun getLibraryName(context: Context, driverLabel: String): String {
-        val driverDir = File(getDriversDirectory(context), driverLabel)
+        if (!isSafePathSegment(driverLabel)) {
+            return ""
+        }
+
+        val driversRoot = getDriversDirectory(context).canonicalFile
+        val driverDir = File(driversRoot, driverLabel).canonicalFile
+        if (!driverDir.path.startsWith(driversRoot.path + File.separator)) {
+            return ""
+        }
+
         val metadataFile = File(driverDir, GPU_DRIVER_META_FILE)
         return try {
-            GpuDriverMetadata.deserialize(metadataFile).libraryName
+            val libraryName = GpuDriverMetadata.deserialize(metadataFile).libraryName
+            if (isSafeLibraryName(libraryName) && File(driverDir, libraryName).isFile) {
+                libraryName
+            } else {
+                ""
+            }
         } catch (e: SerializationException) {
             Log.w(
                 TAG,
@@ -147,7 +190,8 @@ object GpuDriverHelper {
     }
 
     fun ensureFileRedirectDir(context: Context) {
-        File(context.getExternalFilesDir(null), GPU_DRIVER_FILE_REDIRECT_DIR).apply {
+        val redirectRoot = context.getExternalFilesDir(null) ?: context.filesDir
+        File(redirectRoot, GPU_DRIVER_FILE_REDIRECT_DIR).apply {
             if (!isDirectory) {
                 delete()
                 mkdirs()
