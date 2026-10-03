@@ -76,8 +76,11 @@ object GpuDriverHelper {
 
     fun installDriver(context: Context, stream: InputStream): GpuDriverInstallResult {
         val installTempDir =
-            File(context.cacheDir.canonicalPath, GPU_DRIVER_INSTALL_TEMP_DIR).apply {
+            File(context.cacheDir, "$GPU_DRIVER_INSTALL_TEMP_DIR-${System.nanoTime()}").apply {
                 deleteRecursively()
+                if (!mkdirs() && !isDirectory) {
+                    return GpuDriverInstallResult.InvalidArchive
+                }
             }
 
         try {
@@ -93,8 +96,11 @@ object GpuDriverHelper {
 
     fun installDriver(context: Context, file: File): GpuDriverInstallResult {
         val installTempDir =
-            File(context.cacheDir.canonicalPath, GPU_DRIVER_INSTALL_TEMP_DIR).apply {
+            File(context.cacheDir, "$GPU_DRIVER_INSTALL_TEMP_DIR-${System.nanoTime()}").apply {
                 deleteRecursively()
+                if (!mkdirs() && !isDirectory) {
+                    return GpuDriverInstallResult.InvalidArchive
+                }
             }
 
         try {
