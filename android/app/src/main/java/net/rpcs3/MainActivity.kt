@@ -119,7 +119,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        RPCS3.rootDirectory = applicationContext.getExternalFilesDir(null).toString()
+        val externalRoot = applicationContext.getExternalFilesDir(null) ?: applicationContext.filesDir
+        RPCS3.rootDirectory = externalRoot.absolutePath
         if (!RPCS3.rootDirectory.endsWith("/")) {
             RPCS3.rootDirectory += "/"
         }
@@ -186,10 +187,15 @@ class MainActivity : ComponentActivity() {
                     }
 
                 thread(name = "rpcs3-main-processor") {
+                    // Keep latency-sensitive host work ahead of ordinary app tasks.
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY)
                     RPCS3.instance.startMainThreadProcessor()
                 }
 
                 thread(name = "rpcs3-compilation-queue") {
+                    // Shader/PPU cache work must never steal a performance core from
+                    // active emulation. Native workers inherit this scheduling hint.
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
                     RPCS3.instance.processCompilationQueue()
                 }
 
