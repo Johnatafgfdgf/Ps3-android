@@ -1,0 +1,86 @@
+name: Bootstrap PS3Native Android source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bootstrap-import.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import PS3Native android-refresh with history
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "ps3-android-bootstrap"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote remove ps3native 2>/dev/null || true
+          git remote add ps3native https://github.com/maxjivi05/PS3Native.git
+          git fetch ps3native android-refresh --tags
+
+          git checkout -B main ps3native/android-refresh
+
+          mkdir -p .github/workflows
+          rm -f .github/workflows/bootstrap-import.yml
+
+          cat > .github/workflows/sync-upstream.yml <<'YAML'
+name: Sync upstream PS3Native
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge latest PS3Native Android changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "ps3-android-upstream-sync"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/maxjivi05/PS3Native.git
+          git fetch upstream android-refresh
+          git merge --no-edit upstream/android-refresh
+          git push origin main
+YAML
+
+          cat > UPSTREAM.md <<'EOF'
+# Upstream
+
+This repository continues the Android PS3 emulator work from:
+
+- PS3Native: https://github.com/maxjivi05/PS3Native
+- RPCS3: https://github.com/RPCS3/rpcs3
+
+Imported baseline branch: `android-refresh`.
+
+The original project license and notices are preserved. Mobile-specific
+optimizations should be developed as separate, reviewable commits so upstream
+RPCS3/PS3Native updates remain mergeable.
+EOF
+
+          git add .github/workflows/sync-upstream.yml UPSTREAM.md
+          git commit -m "chore(android): initialize Ps3-android continuation" || true
+          git push --force origin main
