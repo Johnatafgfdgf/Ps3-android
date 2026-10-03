@@ -479,6 +479,7 @@
 
     <string name="boot_failed_title">Boot Failed</string>
     <string name="boot_failed_open_image">Could not open the selected disc image</string>
+    <string name="boot_failed_request">The game launch request was incomplete or invalid</string>
     <string name="boot_failed_error">Error: %1$s</string>
 
     <string name="overlay_unknown_button">Unknown</string>
