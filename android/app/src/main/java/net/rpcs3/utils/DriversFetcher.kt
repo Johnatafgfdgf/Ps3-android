@@ -16,18 +16,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.rpcs3.BuildConfig
 import net.rpcs3.R
 import java.io.OutputStream
 import java.io.FileOutputStream
 import java.io.File
 
 object DriversFetcher {
+    private const val MAX_DRIVER_DOWNLOAD_BYTES = 1024L * 1024L * 1024L
     private val httpClient = HttpClient {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
         install(Logging) {
-            level = LogLevel.BODY
+            // Never feed binary driver payloads through the HTTP body logger.
+            level = if (BuildConfig.DEBUG) LogLevel.HEADERS else LogLevel.NONE
         }
     }
 
@@ -99,16 +102,19 @@ object DriversFetcher {
         return try {
             withContext(Dispatchers.IO) {
                 val response: HttpResponse = httpClient.get(assetUrl)
-                val contentLength = response.headers[HttpHeaders.ContentLength]?.toLong() ?: -1L
+                if (response.status.value !in 200..299) {
+                    return@withContext DownloadResult.Error("HTTP ${response.status.value}")
+                }
 
-                FileOutputStream(destinationFile)?.use { outputStream ->
+                val contentLength = response.headers[HttpHeaders.ContentLength]?.toLongOrNull() ?: -1L
+                if (contentLength > MAX_DRIVER_DOWNLOAD_BYTES) {
+                    return@withContext DownloadResult.Error("Driver package is too large")
+                }
+
+                destinationFile.parentFile?.mkdirs()
+                FileOutputStream(destinationFile).use { outputStream ->
                     writeResponseToStream(response, outputStream, contentLength, progressCallback)
-                } ?: return@withContext DownloadResult.Error(
-                    context.getString(
-                        R.string.drivers_download_open_failed,
-                        destinationFile.absolutePath
-                    )
-                )
+                }
             }
             DownloadResult.Success
         } catch (e: Exception) {
@@ -124,7 +130,7 @@ object DriversFetcher {
         progressCallback: (Long, Long) -> Unit
     ) {
         val channel = response.bodyAsChannel()
-        val buffer = ByteArray(1024)
+        val buffer = ByteArray(128 * 1024)
         var totalBytesRead = 0L
 
         while (!channel.isClosedForRead) {
@@ -132,6 +138,9 @@ object DriversFetcher {
             if (bytesRead > 0) {
                 outputStream.write(buffer, 0, bytesRead)
                 totalBytesRead += bytesRead
+                if (totalBytesRead > MAX_DRIVER_DOWNLOAD_BYTES) {
+                    throw IllegalStateException("Driver package exceeded the download size limit")
+                }
                 progressCallback(totalBytesRead, contentLength)
             }
         }
