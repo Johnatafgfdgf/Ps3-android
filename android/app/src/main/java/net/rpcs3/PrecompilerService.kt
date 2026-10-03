@@ -135,16 +135,19 @@ class PrecompilerService : Service() {
                 return false
             }
 
-            if (!RPCS3.instance.installPackages(
-                    fds.toIntArray(), names.toTypedArray(), installProgress
-                )
-            ) {
+            val installResult = RPCS3.instance.installPackages(
+                fds.toIntArray(), names.toTypedArray(), installProgress
+            )
+
+            if (!installResult) {
                 try {
                     ProgressRepository.onProgressEvent(installProgress, -1, 0)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
+
+            return installResult
         } finally {
             descriptors.forEach {
                 try {
@@ -154,8 +157,6 @@ class PrecompilerService : Service() {
                 }
             }
         }
-
-        return true
     }
 
     fun install(mode: Mode, uri: Uri, installProgress: Long): Boolean {
@@ -205,7 +206,7 @@ class PrecompilerService : Service() {
             e.printStackTrace()
         }
 
-        return true
+        return installResult
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -250,11 +251,20 @@ class PrecompilerService : Service() {
             FirmwareRepository.progressChannel.value = installProgress
         }
 
+        val foregroundNotification = NotificationCompat.Builder(this, "rpcs3-progress")
+            .setSmallIcon(R.drawable.ic_stat_ps3native)
+            .setContentTitle(progressTitle(this, mode, batch?.size ?: 1))
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+
         try {
             ServiceCompat.startForeground(
                 this,
                 installProgress.toInt(),
-                NotificationCompat.Builder(this, "rpcs3-progress").build(),
+                foregroundNotification,
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 } else {
@@ -263,6 +273,9 @@ class PrecompilerService : Service() {
             )
         } catch (e: Exception) {
             e.printStackTrace()
+            ProgressRepository.onProgressEvent(installProgress, -1, 0)
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
 
         thread(name = "rpcs3-installer") {
