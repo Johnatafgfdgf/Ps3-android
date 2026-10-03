@@ -265,7 +265,9 @@ class PrecompilerService : Service() {
             e.printStackTrace()
         }
 
-        thread {
+        thread(name = "rpcs3-installer") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+
             val installResult = when {
                 uri != null -> install(mode, uri, installProgress)
                 mode == Mode.PackageBatch || mode == Mode.Package ->
@@ -282,6 +284,6 @@ class PrecompilerService : Service() {
             }
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 }
