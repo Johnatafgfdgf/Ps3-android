@@ -70,7 +70,7 @@ enum class BootResult
     CurrentlyRestricted;
 
     companion object {
-        fun fromInt(value: Int) = entries.first { it.ordinal == value }
+        fun fromInt(value: Int) = entries.firstOrNull { it.ordinal == value } ?: GenericError
     }
 };
 
