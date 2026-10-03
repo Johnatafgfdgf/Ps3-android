@@ -194,7 +194,7 @@ fun AdvancedSettingsScreen(
                                                context.getString(
                                                    R.string.settings_error_assign_value,
                                                    itemPath,
-                                                   value
+                                                   value.toString()
                                                )
                                            )
                                         } else {
@@ -254,7 +254,7 @@ fun AdvancedSettingsScreen(
                                                context.getString(
                                                    R.string.settings_error_assign_value,
                                                    itemPath,
-                                                   value
+                                                   value.toString()
                                                )
                                            )
                                         } else {
@@ -326,7 +326,7 @@ fun AdvancedSettingsScreen(
                                                     context.getString(
                                                         R.string.settings_error_assign_value,
                                                         itemPath,
-                                                        value
+                                                        value.toString()
                                                     )
                                                 )
                                             } else {
@@ -395,7 +395,7 @@ fun AdvancedSettingsScreen(
                                                     context.getString(
                                                         R.string.settings_error_assign_value,
                                                         itemPath,
-                                                        value
+                                                        value.toString()
                                                     )
                                                 )
                                             } else {
@@ -450,7 +450,7 @@ fun AdvancedSettingsScreen(
                                                context.getString(
                                                    R.string.settings_error_assign_value,
                                                    itemPath,
-                                                   value
+                                                   value.toString()
                                                )
                                            )
                                         } else {
