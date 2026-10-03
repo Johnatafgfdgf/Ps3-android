@@ -1269,9 +1269,36 @@ private:
     std::vector<std::string> dir_queue;
     dir_queue.push_back(rootPath.string());
 
-    for (auto entry : std::filesystem::recursive_directory_iterator(rootPath)) {
-      if (entry.is_directory()) {
-        dir_queue.push_back(entry.path().string());
+    // Game folders can contain provider mount-points or unreadable entries.
+    // A single permission error must not terminate the emulator process.
+    std::error_code walk_error;
+    auto dir_it = std::filesystem::recursive_directory_iterator(
+        rootPath, std::filesystem::directory_options::skip_permission_denied,
+        walk_error);
+    const std::filesystem::recursive_directory_iterator dir_end;
+
+    if (walk_error) {
+      rpcs3_android.warning("Unable to fully scan '%s': %s",
+                            rootPath.string(), walk_error.message());
+      walk_error.clear();
+    }
+
+    while (dir_it != dir_end) {
+      std::error_code type_error;
+      if (dir_it->is_directory(type_error) && !type_error) {
+        dir_queue.push_back(dir_it->path().string());
+      }
+
+      if (type_error) {
+        rpcs3_android.warning("Unable to inspect '%s': %s",
+                              dir_it->path().string(), type_error.message());
+      }
+
+      dir_it.increment(walk_error);
+      if (walk_error) {
+        rpcs3_android.warning("Directory scan warning under '%s': %s",
+                              rootPath.string(), walk_error.message());
+        walk_error.clear();
       }
     }
 
