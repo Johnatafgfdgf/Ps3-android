@@ -8,13 +8,6 @@ import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import javax.net.ssl.HostnameVerifier
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.X509TrustManager
 
 private const val TAG = "UpdateFinder"
 private const val USER_AGENT = "PS3Native"
@@ -57,25 +50,15 @@ object UpdateFinder {
         return SONY_HOST_SUFFIXES.any { value.endsWith(it) }
     }
 
-    private val permissiveFactory: SSLSocketFactory by lazy {
-        val trustAll = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        }
-
-        SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(trustAll), SecureRandom())
-        }.socketFactory
-    }
-
     fun open(rawUrl: String, insecureTls: Boolean = false): HttpURLConnection {
         val url = URL(rawUrl)
         val connection = url.openConnection() as HttpURLConnection
 
-        if (connection is HttpsURLConnection && (insecureTls || isSonyHost(url.host))) {
-            connection.sslSocketFactory = permissiveFactory
-            connection.hostnameVerifier = HostnameVerifier { _, _ -> true }
+        // Older configurations may still carry this flag. Consumer builds no
+        // longer disable certificate or hostname verification: an update source
+        // must authenticate normally or fail closed.
+        if (insecureTls) {
+            Log.w(TAG, "Ignoring insecure TLS override for ${url.host}")
         }
 
         connection.requestMethod = "GET"
