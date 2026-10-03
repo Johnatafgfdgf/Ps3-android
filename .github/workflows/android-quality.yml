@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -56,7 +58,11 @@ jobs:
             echo "Release configuration must never reference debug.keystore"
             exit 1
           fi
-          git diff --check HEAD^
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            git diff --check HEAD^ --
+          else
+            git diff --check origin/main...HEAD --
+          fi
 
       - name: Unit tests
         working-directory: android
