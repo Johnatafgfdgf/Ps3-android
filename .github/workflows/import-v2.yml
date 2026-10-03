@@ -18,17 +18,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Replace main with PS3Native android-refresh
+      - name: Import source tree without upstream workflows
         shell: bash
         run: |
           set -euo pipefail
+
           git config user.name "ps3-android-bootstrap"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git remote remove ps3native 2>/dev/null || true
           git remote add ps3native https://github.com/maxjivi05/PS3Native.git
-          git fetch ps3native android-refresh --tags
-          git checkout -B main ps3native/android-refresh
-          printf '%s\n' '# Upstream' '' 'Base: https://github.com/maxjivi05/PS3Native' 'Branch: android-refresh' '' 'This repository continues the Android PS3 emulator work while preserving the original license and history.' > UPSTREAM.md
-          git add UPSTREAM.md
-          git commit -m "chore(android): initialize Ps3-android continuation"
-          git push --force origin main
+          git fetch ps3native android-refresh
+
+          git checkout ps3native/android-refresh -- .
+
+          if git ls-tree -r --name-only HEAD .github/workflows | grep -q .; then
+            git rm -r --cached --ignore-unmatch .github/workflows
+            rm -rf .github/workflows
+            git checkout HEAD -- .github/workflows
+          else
+            git rm -r --cached --ignore-unmatch .github/workflows
+            rm -rf .github/workflows
+          fi
+
+          printf '%s\n'             '# Upstream'             ''             'Base: https://github.com/maxjivi05/PS3Native'             'Branch: android-refresh'             'Imported commit: 4e46dc0b7c7be78fe87b3d7fe03616786712d0d2'             ''             'This repository continues the Android PS3 emulator work while preserving the original license.'             'Upstream workflow files are intentionally not imported because the GitHub Actions token cannot update them.'             > UPSTREAM.md
+
+          git add -A
+          git commit -m "chore(android): import PS3Native android-refresh baseline"
+          git push origin main
