@@ -51,6 +51,8 @@ class RPCS3Activity : ComponentActivity() {
     private var usesAxisR2 = false
     private var bootThread: Thread? = null
     private val hudHandler = Handler(Looper.getMainLooper())
+    private var hudWorkerThread: android.os.HandlerThread? = null
+    private var hudWorkerHandler: Handler? = null
     private var hudPump: Runnable? = null
     private var hudGraphPump: Runnable? = null
     private var hudPrefsListener:
@@ -436,7 +438,18 @@ class RPCS3Activity : ComponentActivity() {
             return
         }
 
-        val reader = DeviceStatsReader(this)
+        if (hudWorkerThread == null) {
+            val workerThread = android.os.HandlerThread(
+                "rpcs3-hud-sampler",
+                android.os.Process.THREAD_PRIORITY_BACKGROUND
+            )
+            workerThread.start()
+            hudWorkerThread = workerThread
+            hudWorkerHandler = Handler(workerThread.looper)
+        }
+
+        val worker = hudWorkerHandler ?: return
+        val reader = DeviceStatsReader(applicationContext)
 
         var lastPresented = -1L
         var lastGenerated = 0L
@@ -451,31 +464,38 @@ class RPCS3Activity : ComponentActivity() {
                 val generated = emu?.optLong("generated", 0L) ?: 0L
                 val now = android.os.SystemClock.elapsedRealtime()
 
-                val outputFps = if (lastPresented >= 0 && now > lastSampleAt && generated > lastGenerated) {
-                    (presented - lastPresented) * 1000f / (now - lastSampleAt)
-                } else {
-                    0f
-                }
+                val outputFps =
+                    if (lastPresented >= 0 && now > lastSampleAt && generated > lastGenerated) {
+                        (presented - lastPresented) * 1000f / (now - lastSampleAt)
+                    } else {
+                        0f
+                    }
 
                 lastPresented = presented
                 lastGenerated = generated
                 lastSampleAt = now
 
-                binding.hudView.submit(
-                    device.copy(
-                        fps = emu?.optDouble("fps", 0.0)?.toFloat() ?: 0f,
-                        outputFps = outputFps,
-                        frametimeMs = emu?.optDouble("frametime", 0.0)?.toFloat() ?: 0f,
-                        renderer = emu?.optString("renderer").orEmpty(),
-                        gpuPercent = if (device.gpuPercent >= 0) {
-                            device.gpuPercent
-                        } else {
-                            emu?.optInt("rsxLoad", -1) ?: -1
-                        }
-                    )
+                val sample = device.copy(
+                    fps = emu?.optDouble("fps", 0.0)?.toFloat() ?: 0f,
+                    outputFps = outputFps,
+                    frametimeMs = emu?.optDouble("frametime", 0.0)?.toFloat() ?: 0f,
+                    renderer = emu?.optString("renderer").orEmpty(),
+                    gpuPercent = if (device.gpuPercent >= 0) {
+                        device.gpuPercent
+                    } else {
+                        emu?.optInt("rsxLoad", -1) ?: -1
+                    }
                 )
 
-                hudHandler.postDelayed(this, HUD_REFRESH_MS)
+                hudHandler.post {
+                    if (hudPump != null && !isFinishing && !isDestroyed) {
+                        binding.hudView.submit(sample)
+                    }
+                }
+
+                if (hudPump != null) {
+                    worker.postDelayed(this, HUD_REFRESH_MS)
+                }
             }
         }
 
@@ -483,19 +503,27 @@ class RPCS3Activity : ComponentActivity() {
             override fun run() {
                 val ms = runCatching { RPCS3.instance.frameTimeMs() }.getOrDefault(0f)
                 if (ms > 0f) {
-                    binding.hudView.addFrameSample(ms)
+                    hudHandler.post {
+                        if (hudGraphPump != null && !isFinishing && !isDestroyed) {
+                            binding.hudView.addFrameSample(ms)
+                        }
+                    }
                 }
-                hudHandler.postDelayed(this, HUD_GRAPH_MS)
+
+                if (hudGraphPump != null) {
+                    worker.postDelayed(this, HUD_GRAPH_MS)
+                }
             }
         }
 
-        hudHandler.post(hudPump!!)
-        hudHandler.post(hudGraphPump!!)
+        worker.post(hudPump!!)
+        worker.post(hudGraphPump!!)
     }
 
     private fun stopPump() {
-        hudPump?.let { hudHandler.removeCallbacks(it) }
-        hudGraphPump?.let { hudHandler.removeCallbacks(it) }
+        val worker = hudWorkerHandler
+        hudPump?.let { worker?.removeCallbacks(it) }
+        hudGraphPump?.let { worker?.removeCallbacks(it) }
         hudPump = null
         hudGraphPump = null
     }
@@ -506,6 +534,11 @@ class RPCS3Activity : ComponentActivity() {
             HudPrefs.of(this).unregisterOnSharedPreferenceChangeListener(it)
         }
         hudPrefsListener = null
+
+        hudWorkerHandler?.removeCallbacksAndMessages(null)
+        hudWorkerHandler = null
+        hudWorkerThread?.quitSafely()
+        hudWorkerThread = null
     }
 
     private fun setDrawerVisible(visible: Boolean) {
