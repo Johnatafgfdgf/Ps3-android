@@ -18,7 +18,7 @@ object DriverSelection {
     private fun keyFor(titleId: String) = "game_$titleId"
 
     fun globalPath(context: Context): String =
-        prefs(context).getString(GLOBAL_KEY, null) ?: readSetting("")
+        validatedPath(context, prefs(context).getString(GLOBAL_KEY, null) ?: readSetting(""))
 
     fun hasOverride(context: Context, titleId: String) =
         titleId.isNotEmpty() && prefs(context).contains(keyFor(titleId))
@@ -28,7 +28,7 @@ object DriverSelection {
             return null
         }
 
-        return prefs(context).getString(keyFor(titleId), null)
+        return prefs(context).getString(keyFor(titleId), null)?.let { validatedPath(context, it) }
     }
 
     fun resolve(context: Context, titleId: String): String =
@@ -88,9 +88,29 @@ object DriverSelection {
         RPCS3.instance.settingsGet(DriverPathKey, titleId).trim().trim('"')
     }.getOrDefault("")
 
+    private fun validatedPath(context: Context, path: String): String {
+        if (path.isBlank()) {
+            return ""
+        }
+
+        return runCatching {
+            val driverRoot = File(context.filesDir, "gpu_drivers").canonicalFile
+            val selected = File(path).canonicalFile
+            val insideDriverRoot =
+                selected.path.startsWith(driverRoot.path + File.separator)
+
+            if (insideDriverRoot && selected.isDirectory) {
+                selected.path
+            } else {
+                ""
+            }
+        }.getOrDefault("")
+    }
+
     private fun writeSetting(context: Context, path: String, titleId: String) {
         runCatching {
-            RPCS3.instance.settingsSet(DriverPathKey, "\"" + path + "\"", titleId)
+            val safePath = validatedPath(context, path)
+            RPCS3.instance.settingsSet(DriverPathKey, "\"" + safePath + "\"", titleId)
             RPCS3.instance.settingsSet(
                 DriverDataDirKey, "\"" + context.filesDir + "\"", titleId
             )
