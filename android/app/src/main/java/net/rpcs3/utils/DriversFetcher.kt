@@ -118,6 +118,7 @@ object DriversFetcher {
             }
             DownloadResult.Success
         } catch (e: Exception) {
+            destinationFile.delete()
             Log.e("DriversFetcher", "Error downloading file: ${e.message}", e)
             DownloadResult.Error(e.message)
         }
