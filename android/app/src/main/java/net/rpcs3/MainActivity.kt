@@ -87,6 +87,7 @@ private fun KeepScreenOn(active: Boolean) {
 
 class MainActivity : ComponentActivity() {
     private var unregisterUsbEventListener: (() -> Unit)? = null
+    private val startupError = androidx.compose.runtime.mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,10 +112,11 @@ class MainActivity : ComponentActivity() {
             KeepScreenOn(active = firmwareInstalling)
 
             RPCS3Theme {
-                if (RPCS3.initialized.value) {
-                    AppNavHost()
-                } else {
-                    StartupScreen()
+                val error = startupError.value
+                when {
+                    error != null -> UnsupportedCpuScreen(error)
+                    RPCS3.initialized.value -> AppNavHost()
+                    else -> StartupScreen()
                 }
             }
         }
@@ -151,10 +153,26 @@ class MainActivity : ComponentActivity() {
             }
 
             thread(name = "rpcs3-startup") {
-                installBundledAssets(assets, RPCS3.rootDirectory)
-                installBundledPatches(assets, RPCS3.rootDirectory)
-                RPCS3.instance.initialize(RPCS3.rootDirectory)
-                applyDefaultLogLevels()
+                try {
+                    installBundledAssets(assets, RPCS3.rootDirectory)
+                    installBundledPatches(assets, RPCS3.rootDirectory)
+
+                    if (!RPCS3.instance.initialize(RPCS3.rootDirectory)) {
+                        lifecycleScope.launch {
+                            startupError.value = getString(R.string.startup_failed)
+                        }
+                        return@thread
+                    }
+
+                    applyDefaultLogLevels()
+                } catch (error: Throwable) {
+                    android.util.Log.e("RPCS3", "Native initialization failed", error)
+                    lifecycleScope.launch {
+                        startupError.value = getString(R.string.startup_failed)
+                    }
+                    return@thread
+                }
+
                 val hookDirectory = "\"" + nativeLibraryDir + "\""
                 val internalDataDirectory = "\"" + filesDir + "\""
                 RPCS3.instance.settingsSet(
