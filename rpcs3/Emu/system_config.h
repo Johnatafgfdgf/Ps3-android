@@ -23,7 +23,14 @@ struct cfg_root : cfg::node
 		cfg::string llvm_cpu{ this, "Use LLVM CPU" };
 		cfg::_int<0, 1024> llvm_threads{ this, "Max LLVM Compile Threads", 0, false, nullptr, []{ return std::thread::hardware_concurrency() * 2; } };
 		cfg::_bool llvm_precompilation{ this, "LLVM Precompilation", true };
+#ifdef ANDROID
+		// Android devices are predominantly heterogeneous ARM SoCs. The alternative
+		// scheduler enables capacity-aware PPU/SPU/RSX placement while still
+		// honoring explicit per-core affinity overrides.
+		cfg::_enum<thread_scheduler_mode> thread_scheduler{this, "Thread Scheduler Mode", thread_scheduler_mode::alt};
+#else
 		cfg::_enum<thread_scheduler_mode> thread_scheduler{this, "Thread Scheduler Mode", thread_scheduler_mode::os};
+#endif
 		cfg::_bool set_daz_and_ftz{ this, "Set DAZ and FTZ", false };
 		cfg::_enum<spu_decoder_type> spu_decoder{ this, "SPU Decoder", spu_decoder_type::llvm };
 		cfg::uint<0, 100> spu_reservation_busy_waiting_percentage{ this, "SPU Reservation Busy Waiting Percentage 1", 100, true };
