@@ -3779,24 +3779,51 @@ static const std::array<u32, 64>& get_arm_core_capacities()
 	{
 		std::array<u32, 64> caps{};
 
-		for (u32 core = 0; core < 64u; core++)
+		const auto read_sysfs_u32 = [](const char* path) -> u32
 		{
-			char path[128];
-			std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/cpu_capacity", core);
-
 			const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
 			if (fd < 0)
 			{
-				continue;
+				return 0;
 			}
 
 			char buf[32]{};
 			const auto got = ::read(fd, buf, sizeof(buf) - 1);
 			::close(fd);
 
-			if (got > 0)
+			return got > 0 ? static_cast<u32>(std::strtoul(buf, nullptr, 10)) : 0;
+		};
+
+		u32 highest_capacity = 0;
+		for (u32 core = 0; core < 64u; core++)
+		{
+			char path[160];
+			std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/cpu_capacity", core);
+			caps[core] = read_sysfs_u32(path);
+			highest_capacity = std::max(highest_capacity, caps[core]);
+		}
+
+		if (highest_capacity)
+		{
+			return caps;
+		}
+
+		// Some Android kernels do not expose cpu_capacity to applications. Maximum
+		// frequency is less precise, but still provides a stable relative topology
+		// signal for big.LITTLE scheduling. Only use it when capacity is completely
+		// unavailable so the two different unit scales are never mixed.
+		for (u32 core = 0; core < 64u; core++)
+		{
+			char path[160];
+			std::snprintf(path, sizeof(path),
+				"/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", core);
+			caps[core] = read_sysfs_u32(path);
+
+			if (!caps[core])
 			{
-				caps[core] = static_cast<u32>(std::atoi(buf));
+				std::snprintf(path, sizeof(path),
+					"/sys/devices/system/cpu/cpu%u/cpufreq/scaling_max_freq", core);
+				caps[core] = read_sysfs_u32(path);
 			}
 		}
 
@@ -3945,7 +3972,7 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 			return mask;
 		}
 
-		sig_log.warning("Android affinity override produced an empty mask for %s; using automatic scheduling.", group);
+		sig_log.warning("Android affinity override produced an empty mask for class %u; using automatic scheduling.", static_cast<u32>(group));
 	}
 #endif
 
