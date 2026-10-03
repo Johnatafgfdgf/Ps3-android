@@ -95,7 +95,12 @@ fun listenUsbEvents(context: Context): () -> Unit  {
     filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
     filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
     filter.addAction(ACTION_USB_PERMISSION)
-    context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
+    } else {
+        @Suppress("DEPRECATION")
+        context.registerReceiver(usbReceiver, filter)
+    }
 
     for (usbDevice in usbManager.deviceList.values) {
         if (usbManager.hasPermission(usbDevice)) {
