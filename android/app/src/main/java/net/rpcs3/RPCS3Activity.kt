@@ -153,7 +153,15 @@ class RPCS3Activity : ComponentActivity() {
         binding.oscToggle.post { placeToggleBesideR3() }
 
         val isoUriString = intent.getStringExtra("isoUri")
-        val gamePath = intent.getStringExtra("path") ?: isoUriString!!
+        val gamePath = intent.getStringExtra("path") ?: isoUriString
+        if (gamePath.isNullOrBlank()) {
+            AlertDialogQueue.showDialog(
+                getString(R.string.boot_failed_title),
+                getString(R.string.boot_failed_request)
+            )
+            finish()
+            return
+        }
         val bootPath = intent.getStringExtra("bootPath") ?: gamePath
 
         if (isoUriString != null) {
@@ -565,8 +573,19 @@ class RPCS3Activity : ComponentActivity() {
         }
         unregisterUsbEventListener()
         RPCS3.instance.surfaceHostAlive(false)
-        bootThread?.interrupt()
-        bootThread?.join()
+
+        // Never wait indefinitely for native boot work from the UI thread.
+        // Interrupt is advisory while the thread is inside JNI, so join it on
+        // a daemon cleanup thread instead of risking an Activity ANR.
+        val bootWorker = bootThread
+        bootThread = null
+        bootWorker?.interrupt()
+        if (bootWorker?.isAlive == true) {
+            thread(name = "rpcs3-boot-cleanup", isDaemon = true) {
+                runCatching { bootWorker.join(5_000) }
+            }
+        }
+
         runCatching { isoDescriptor?.close() }
         isoDescriptor = null
     }
