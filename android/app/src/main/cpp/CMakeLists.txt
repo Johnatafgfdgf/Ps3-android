@@ -5,11 +5,20 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_POSITION_INDEPENDENT_CODE on)
 
 if(ANDROID_ABI STREQUAL "arm64-v8a")
-    add_compile_options(-march=armv8.2-a+dotprod+fp16)
+    # CpuSupport requires these features at runtime, so generate native LSE
+    # atomics instead of compatibility loops. RPCS3 is synchronization-heavy
+    # and benefits materially from direct ARMv8.2 atomic instructions.
+    add_compile_options(
+        -march=armv8.2-a+dotprod+fp16+lse
+        -ffunction-sections
+        -fdata-sections
+    )
 endif()
 
-set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -ffunction-sections -fdata-sections")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -ffunction-sections -fdata-sections")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG -ffunction-sections -fdata-sections")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG -ffunction-sections -fdata-sections")
 
 get_filename_component(RPCS3_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 get_filename_component(RPCS3_ANDROID_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
@@ -98,6 +107,14 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC ${RPCS3_SOURCE_DIR}/rpcs3)
+
+# lld's section garbage collection and safe identical-code folding reduce the
+# native image size and instruction-cache pressure without changing emulation
+# semantics.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    "-Wl,--gc-sections"
+    "-Wl,--icf=safe"
+)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
     android
