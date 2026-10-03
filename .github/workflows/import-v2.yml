@@ -1,0 +1,34 @@
+name: Import PS3Native Android baseline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/import-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Replace main with PS3Native android-refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "ps3-android-bootstrap"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote remove ps3native 2>/dev/null || true
+          git remote add ps3native https://github.com/maxjivi05/PS3Native.git
+          git fetch ps3native android-refresh --tags
+          git checkout -B main ps3native/android-refresh
+          printf '%s\n' '# Upstream' '' 'Base: https://github.com/maxjivi05/PS3Native' 'Branch: android-refresh' '' 'This repository continues the Android PS3 emulator work while preserving the original license and history.' > UPSTREAM.md
+          git add UPSTREAM.md
+          git commit -m "chore(android): initialize Ps3-android continuation"
+          git push --force origin main
