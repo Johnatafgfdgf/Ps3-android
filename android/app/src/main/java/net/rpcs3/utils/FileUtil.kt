@@ -21,6 +21,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.ArrayDeque
 import kotlin.concurrent.thread
 
 private data class InstallableFolder(
@@ -29,15 +30,17 @@ private data class InstallableFolder(
 
 object FileUtil {
     fun installPackages(context: Context, rootFolderUri: Uri) {
-        thread {
-            val workList = mutableListOf<Uri>()
-            workList.add(rootFolderUri)
+        thread(name = "rpcs3-folder-installer") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+
+            val workList = ArrayDeque<Uri>()
+            workList.addLast(rootFolderUri)
 
             val batchFiles = mutableListOf<Uri>()
             val batchDirs = mutableListOf<InstallableFolder>()
 
             while (workList.isNotEmpty()) {
-                val currentFolderUri = workList.removeAt(0)
+                val currentFolderUri = workList.removeFirst()
 
                 val paramSfo =
                     uriOpenFile(context, currentFolderUri, "PS3_GAME/PARAM.SFO") ?: uriOpenFile(
@@ -57,7 +60,7 @@ object FileUtil {
 
                 listFiles(currentFolderUri, context).forEach { item ->
                     if (item.isDirectory) {
-                        workList.add(item.uri)
+                        workList.addLast(item.uri)
                     } else {
                         batchFiles += item.uri
                     }
@@ -102,18 +105,20 @@ object FileUtil {
                     context.getString(R.string.progress_installing_directory)
                 )
                 GameRepository.add(arrayOf(GameInfo("$")), progress)
-                copyDirUriToInternalStorage(context, it.uri, it.targetPath, progress)
-                RPCS3.instance.collectGameInfo(it.targetPath, -1L)
+                if (copyDirUriToInternalStorage(context, it.uri, it.targetPath, progress)) {
+                    RPCS3.instance.collectGameInfo(it.targetPath, -1L)
+                }
             }
         }
     }
 
     private fun findGameParamSfos(context: Context, rootFolderUri: Uri): List<SimpleDocument> {
-        val workList = mutableListOf(rootFolderUri)
+        val workList = ArrayDeque<Uri>()
+        workList.addLast(rootFolderUri)
         val found = mutableListOf<SimpleDocument>()
 
         while (workList.isNotEmpty()) {
-            val currentFolderUri = workList.removeAt(0)
+            val currentFolderUri = workList.removeFirst()
 
             val sfo = uriChild(context, currentFolderUri, "PS3_GAME/PARAM.SFO")
                 ?: uriChild(context, currentFolderUri, "PARAM.SFO")
@@ -125,7 +130,7 @@ object FileUtil {
 
             listFiles(currentFolderUri, context).forEach { item ->
                 if (item.isDirectory) {
-                    workList.add(item.uri)
+                    workList.addLast(item.uri)
                 }
             }
         }
@@ -185,7 +190,9 @@ object FileUtil {
     }
 
     fun directBootFolder(context: Context, rootFolderUri: Uri) {
-        thread {
+        thread(name = "rpcs3-direct-boot-scan") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+
             val progress = ProgressRepository.create(
                 context, context.getString(R.string.progress_adding_game_folder)
             )
@@ -226,13 +233,13 @@ object FileUtil {
 
     fun copyDirUriToInternalStorage(
         context: Context, rootFolderUri: Uri, path: String, progressId: Long
-    ) {
-        val workList = mutableListOf<Pair<Uri, String>>()
-        workList.add(Pair(rootFolderUri, path))
+    ): Boolean {
+        val workList = ArrayDeque<Pair<Uri, String>>()
+        workList.addLast(rootFolderUri to path)
         val fileList = mutableListOf<Pair<Uri, String>>()
 
         while (workList.isNotEmpty()) {
-            val currentFolderUriTarget = workList.removeAt(0)
+            val currentFolderUriTarget = workList.removeFirst()
             val currentFolderUri = currentFolderUriTarget.first
             val currentFolderTarget = currentFolderUriTarget.second
 
@@ -240,7 +247,7 @@ object FileUtil {
                 val file = File(currentFolderTarget, item.filename)
                 if (item.isDirectory) {
                     file.mkdirs()
-                    workList.add(Pair(item.uri, file.path))
+                    workList.addLast(item.uri to file.path)
                 } else {
                     fileList.add(Pair(item.uri, file.path))
                 }
@@ -251,41 +258,51 @@ object FileUtil {
         var processed = 0L
 
         fileList.forEach { file ->
-            saveFile(context, file.first, file.second)
-            ProgressRepository.onProgressEvent(progressId, ++processed, fileList.size.toLong())
-        }
-    }
-
-    private fun saveFile(context: Context, source: Uri, target: String) {
-        var bis: BufferedInputStream? = null
-        var bos: BufferedOutputStream? = null
-
-        try {
-            bis = BufferedInputStream(
-                FileInputStream(
-                    context.contentResolver.openFileDescriptor(
-                        source, "r"
-                    )!!.fileDescriptor
-                )
-            )
-
-            bos = BufferedOutputStream(FileOutputStream(target, false))
-            val buf = ByteArray(64 * 1024)
-
-            while (true) {
-                val read = bis.read(buf)
-                if (read <= 0) {
-                    break
-                }
-                bos.write(buf, 0, read)
+            if (!saveFile(context, file.first, file.second)) {
+                ProgressRepository.onProgressEvent(progressId, -1, 0)
+                return false
             }
 
-            bos.flush()
+            ProgressRepository.onProgressEvent(progressId, ++processed, fileList.size.toLong())
+        }
+
+        // Empty directories are still a successful copy operation.
+        if (fileList.isEmpty()) {
+            ProgressRepository.onProgressEvent(progressId, 1, 1)
+        }
+
+        return true
+    }
+
+    private fun saveFile(context: Context, source: Uri, target: String): Boolean {
+        return try {
+            val targetFile = File(target)
+            targetFile.parentFile?.mkdirs()
+
+            val descriptor = context.contentResolver.openFileDescriptor(source, "r")
+                ?: return false
+
+            descriptor.use { pfd ->
+                BufferedInputStream(FileInputStream(pfd.fileDescriptor), 256 * 1024).use { input ->
+                    BufferedOutputStream(FileOutputStream(targetFile, false), 256 * 1024).use { output ->
+                        val buffer = ByteArray(256 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                        }
+                        output.flush()
+                    }
+                }
+            }
+
+            true
         } catch (e: IOException) {
-            e.printStackTrace()
-        } finally {
-            bis?.close()
-            bos?.close()
+            Log.e("FileUtil", "Failed to copy $source to $target", e)
+            false
+        } catch (e: SecurityException) {
+            Log.e("FileUtil", "Permission denied while copying $source", e)
+            false
         }
     }
 
@@ -334,7 +351,7 @@ object FileUtil {
 
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
             c = context.contentResolver.query(childrenUri, columns, null, null, null)
-            while (c!!.moveToNext()) {
+            while (c?.moveToNext() == true) {
                 val documentId = c.getString(0)
                 val documentName = c.getString(1)
                 val documentMimeType = c.getString(2)
