@@ -1,0 +1,368 @@
+package net.rpcs3.utils
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.content.res.AssetFileDescriptor
+import android.database.Cursor
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.util.Log
+import androidx.core.content.edit
+import net.rpcs3.GameInfo
+import net.rpcs3.GameRepository
+import net.rpcs3.PrecompilerService
+import net.rpcs3.PrecompilerServiceAction
+import net.rpcs3.ProgressRepository
+import net.rpcs3.R
+import net.rpcs3.RPCS3
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import kotlin.concurrent.thread
+
+private data class InstallableFolder(
+    val uri: Uri, val targetPath: String
+)
+
+object FileUtil {
+    fun installPackages(context: Context, rootFolderUri: Uri) {
+        thread {
+            val workList = mutableListOf<Uri>()
+            workList.add(rootFolderUri)
+
+            val batchFiles = mutableListOf<Uri>()
+            val batchDirs = mutableListOf<InstallableFolder>()
+
+            while (workList.isNotEmpty()) {
+                val currentFolderUri = workList.removeAt(0)
+
+                val paramSfo =
+                    uriOpenFile(context, currentFolderUri, "PS3_GAME/PARAM.SFO") ?: uriOpenFile(
+                        context, currentFolderUri, "PARAM.SFO"
+                    )
+
+                if (paramSfo != null) {
+                    val installDir =
+                        RPCS3.instance.getDirInstallPath(paramSfo.parcelFileDescriptor.fd)
+                    paramSfo.close()
+
+                    if (installDir != null) {
+                        batchDirs += InstallableFolder(currentFolderUri, installDir)
+                        continue
+                    }
+                }
+
+                listFiles(currentFolderUri, context).forEach { item ->
+                    if (item.isDirectory) {
+                        workList.add(item.uri)
+                    } else {
+                        batchFiles += item.uri
+                    }
+                }
+            }
+
+            if (batchFiles.isEmpty() && batchDirs.isEmpty()) {
+                val progress = ProgressRepository.create(
+                    context, context.getString(R.string.folder_add_empty_title)
+                )
+                ProgressRepository.onProgressEvent(
+                    progress, -1, 0, context.getString(R.string.folder_add_empty_message)
+                )
+                return@thread
+            }
+
+            if (batchFiles.isNotEmpty()) {
+                val packages = batchFiles.mapNotNull { PackageInspector.read(context, it) }
+                val installable = packages.filter { it.kind == PackageKind.Pkg && it.valid }
+                val others = packages.filter { it.kind != PackageKind.Pkg }
+
+                others.forEach {
+                    PrecompilerService.start(context, PrecompilerServiceAction.Install, it.uri)
+                }
+
+                if (installable.isNotEmpty()) {
+                    PrecompilerService.start(
+                        context,
+                        PrecompilerServiceAction.InstallPackages,
+                        ArrayList(PackageInspector.installOrder(installable).map { it.uri })
+                    )
+                }
+            }
+
+            batchDirs.forEach {
+                if (GameRepository.find(it.targetPath) != null) {
+                    return@forEach
+                }
+
+                val progress = ProgressRepository.create(
+                    context,
+                    context.getString(R.string.progress_installing_directory)
+                )
+                GameRepository.add(arrayOf(GameInfo("$")), progress)
+                copyDirUriToInternalStorage(context, it.uri, it.targetPath, progress)
+                RPCS3.instance.collectGameInfo(it.targetPath, -1L)
+            }
+        }
+    }
+
+    private fun findGameParamSfos(context: Context, rootFolderUri: Uri): List<SimpleDocument> {
+        val workList = mutableListOf(rootFolderUri)
+        val found = mutableListOf<SimpleDocument>()
+
+        while (workList.isNotEmpty()) {
+            val currentFolderUri = workList.removeAt(0)
+
+            val sfo = uriChild(context, currentFolderUri, "PS3_GAME/PARAM.SFO")
+                ?: uriChild(context, currentFolderUri, "PARAM.SFO")
+
+            if (sfo != null && !sfo.isDirectory) {
+                found += sfo
+                continue
+            }
+
+            listFiles(currentFolderUri, context).forEach { item ->
+                if (item.isDirectory) {
+                    workList.add(item.uri)
+                }
+            }
+        }
+
+        return found
+    }
+
+    private fun addDirectBootGame(context: Context, paramSfo: SimpleDocument): Int {
+        val descriptor = runCatching {
+            context.contentResolver.openFileDescriptor(paramSfo.uri, "r")
+        }.getOrNull()
+
+        val paramSfoPath = descriptor?.fd?.let { FolderGames.resolveDescriptorPath(it) }
+        runCatching { descriptor?.close() }
+
+        if (paramSfoPath == null) {
+            return R.string.folder_direct_boot_unreadable
+        }
+
+        val gameRoot = FolderGames.gameRootOf(paramSfoPath)
+
+        if (!File(gameRoot).isDirectory) {
+            return R.string.folder_direct_boot_unreadable
+        }
+
+        val details = GameDetailsReader.read(gameRoot)
+
+        if (details.category.isEmpty()) {
+            return R.string.folder_direct_boot_no_game
+        }
+
+        if (details.category == "DG" && !File(gameRoot, "PS3_DISC.SFB").isFile) {
+            return R.string.folder_direct_boot_no_disc
+        }
+
+        if (GameRepository.find(gameRoot) != null) {
+            return R.string.folder_direct_boot_exists
+        }
+
+        if (FolderGames.link(gameRoot, details.titleId) == null) {
+            return R.string.folder_direct_boot_link_failed
+        }
+
+        GameRepository.add(
+            arrayOf(
+                GameInfo(
+                    gameRoot,
+                    details.title.ifEmpty { details.titleId },
+                    FolderGames.iconPathOf(gameRoot),
+                    0
+                )
+            ),
+            PrecompilerService.NoProgress
+        )
+
+        return 0
+    }
+
+    fun directBootFolder(context: Context, rootFolderUri: Uri) {
+        thread {
+            val progress = ProgressRepository.create(
+                context, context.getString(R.string.progress_adding_game_folder)
+            )
+
+            val paramSfos = findGameParamSfos(context, rootFolderUri)
+
+            if (paramSfos.isEmpty()) {
+                ProgressRepository.onProgressEvent(
+                    progress, -1, 0, context.getString(R.string.folder_direct_boot_no_game)
+                )
+                return@thread
+            }
+
+            var added = 0
+            var failure = R.string.folder_direct_boot_no_game
+
+            paramSfos.forEach { paramSfo ->
+                val result = addDirectBootGame(context, paramSfo)
+
+                if (result == 0) {
+                    added++
+                } else {
+                    failure = result
+                }
+            }
+
+            if (added == 0) {
+                ProgressRepository.onProgressEvent(progress, -1, 0, context.getString(failure))
+            } else {
+                ProgressRepository.onProgressEvent(progress, added.toLong(), added.toLong())
+            }
+        }
+    }
+
+    fun saveGameFolderUri(prefs: SharedPreferences, uri: Uri) {
+        prefs.edit { putString("selected_game_folder", uri.toString()) }
+    }
+
+    fun copyDirUriToInternalStorage(
+        context: Context, rootFolderUri: Uri, path: String, progressId: Long
+    ) {
+        val workList = mutableListOf<Pair<Uri, String>>()
+        workList.add(Pair(rootFolderUri, path))
+        val fileList = mutableListOf<Pair<Uri, String>>()
+
+        while (workList.isNotEmpty()) {
+            val currentFolderUriTarget = workList.removeAt(0)
+            val currentFolderUri = currentFolderUriTarget.first
+            val currentFolderTarget = currentFolderUriTarget.second
+
+            listFiles(currentFolderUri, context).forEach { item ->
+                val file = File(currentFolderTarget, item.filename)
+                if (item.isDirectory) {
+                    file.mkdirs()
+                    workList.add(Pair(item.uri, file.path))
+                } else {
+                    fileList.add(Pair(item.uri, file.path))
+                }
+            }
+        }
+
+        ProgressRepository.onProgressEvent(progressId, 0, fileList.size.toLong())
+        var processed = 0L
+
+        fileList.forEach { file ->
+            saveFile(context, file.first, file.second)
+            ProgressRepository.onProgressEvent(progressId, ++processed, fileList.size.toLong())
+        }
+    }
+
+    private fun saveFile(context: Context, source: Uri, target: String) {
+        var bis: BufferedInputStream? = null
+        var bos: BufferedOutputStream? = null
+
+        try {
+            bis = BufferedInputStream(
+                FileInputStream(
+                    context.contentResolver.openFileDescriptor(
+                        source, "r"
+                    )!!.fileDescriptor
+                )
+            )
+
+            bos = BufferedOutputStream(FileOutputStream(target, false))
+            val buf = ByteArray(64 * 1024)
+
+            while (true) {
+                val read = bis.read(buf)
+                if (read <= 0) {
+                    break
+                }
+                bos.write(buf, 0, read)
+            }
+
+            bos.flush()
+        } catch (e: IOException) {
+            e.printStackTrace()
+        } finally {
+            bis?.close()
+            bos?.close()
+        }
+    }
+
+    fun uriChild(context: Context, rootUri: Uri, path: String): SimpleDocument? {
+        val pathDirectories = path.split("/").toMutableList()
+        var uri = rootUri
+        val filename = pathDirectories.removeAt(pathDirectories.size - 1)
+
+        while (pathDirectories.isNotEmpty()) {
+            val dirName = pathDirectories.removeAt(0)
+            val entry = listFiles(uri, context).find { it.filename == dirName }
+            if (entry == null || !entry.isDirectory) {
+                return null
+            }
+
+            uri = entry.uri
+        }
+
+        return listFiles(uri, context).find { it.filename == filename }
+    }
+
+    fun uriOpenFile(context: Context, rootUri: Uri, path: String): AssetFileDescriptor? {
+        val entry = uriChild(context, rootUri, path)
+
+        if (entry == null || entry.isDirectory) {
+            return null
+        }
+
+        return context.contentResolver.openAssetFileDescriptor(entry.uri, "r")
+    }
+
+    fun listFiles(uri: Uri, context: Context): Array<SimpleDocument> {
+        val columns = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        )
+        var c: Cursor? = null
+        val results: MutableList<SimpleDocument> = ArrayList()
+        try {
+            val docId = if (isRootTreeUri(uri)) {
+                DocumentsContract.getTreeDocumentId(uri)
+            } else {
+                DocumentsContract.getDocumentId(uri)
+            }
+
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
+            c = context.contentResolver.query(childrenUri, columns, null, null, null)
+            while (c!!.moveToNext()) {
+                val documentId = c.getString(0)
+                val documentName = c.getString(1)
+                val documentMimeType = c.getString(2)
+                val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
+                val document = SimpleDocument(documentName, documentMimeType, documentUri)
+                results.add(document)
+            }
+        } catch (e: Exception) {
+            Log.e("FileUtil", "Cannot list file error: " + e.message)
+        } finally {
+            c?.close()
+        }
+        return results.toTypedArray<SimpleDocument>()
+    }
+
+    fun isRootTreeUri(uri: Uri): Boolean {
+        val paths = uri.pathSegments
+        return paths.size == 2 && "tree" == paths[0]
+    }
+
+    fun deleteCache(ctx: Context, gameId: String, onComplete: (Boolean) -> Unit) {
+        CacheUtil.clear(gameId, CacheKind.All) { result ->
+            onComplete(result.failed == 0)
+        }
+    }
+}
+
+class SimpleDocument(val filename: String, val mimeType: String, val uri: Uri) {
+    val isDirectory: Boolean
+        get() = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+}
