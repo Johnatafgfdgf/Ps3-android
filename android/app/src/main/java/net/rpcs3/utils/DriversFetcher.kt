@@ -16,7 +16,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import net.rpcs3.BuildConfig
 import net.rpcs3.R
 import java.io.OutputStream
 import java.io.FileOutputStream
@@ -29,8 +28,9 @@ object DriversFetcher {
             json(Json { ignoreUnknownKeys = true })
         }
         install(Logging) {
-            // Never feed binary driver payloads through the HTTP body logger.
-            level = if (BuildConfig.DEBUG) LogLevel.HEADERS else LogLevel.NONE
+            // Driver archives are binary and repository responses may contain URLs
+            // or metadata we do not need in production logs.
+            level = LogLevel.NONE
         }
     }
 
