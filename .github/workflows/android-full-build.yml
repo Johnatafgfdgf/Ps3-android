@@ -1,0 +1,220 @@
+name: Android full native build
+
+on:
+  push:
+    branches:
+      - production-mobile-v1
+    paths:
+      - ".github/workflows/android-full-build.yml"
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Build variant
+        type: choice
+        options: [debug, release]
+        default: debug
+      rebuild_deps:
+        description: Force rebuild of LLVM and FFmpeg
+        type: boolean
+        default: false
+
+concurrency:
+  group: android-full-${{ github.ref }}-${{ inputs.variant || 'debug' }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 29.0.14206865
+  CMAKE_VERSION: 3.31.6
+  VARIANT: ${{ inputs.variant || 'debug' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install host build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
+
+      - name: Install Android NDK and CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          manager="$sdk/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$manager" ]; then
+            manager=$(find "$sdk" -type f -name sdkmanager 2>/dev/null | head -1)
+          fi
+          test -n "$manager"
+          yes | "$manager" --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$sdk/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ps3android-native-${{ env.NDK_VERSION }}
+          max-size: 3G
+
+      - name: Resolve pinned LLVM revision
+        id: llvmrev
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD:3rdparty/llvm/llvm)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache native prebuilts
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: android/prebuilt
+          key: ps3android-prebuilt-${{ env.NDK_VERSION }}-${{ hashFiles('android/build-llvm-android.sh', 'android/build-ffmpeg-android.sh', 'android/patches/*.patch') }}-${{ steps.llvmrev.outputs.sha }}
+
+      - name: Build FFmpeg for arm64-v8a
+        if: steps.deps.outputs.cache-hit != 'true' || inputs.rebuild_deps
+        working-directory: android
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: ./build-ffmpeg-android.sh
+
+      - name: Build LLVM for arm64-v8a
+        if: steps.deps.outputs.cache-hit != 'true' || inputs.rebuild_deps
+        working-directory: android
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: ./build-llvm-android.sh
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache native build tree
+        uses: actions/cache@v4
+        with:
+          path: android/app/.cxx
+          key: ps3android-cxx-${{ env.VARIANT }}-${{ env.NDK_VERSION }}-${{ hashFiles('android/app/src/main/cpp/CMakeLists.txt', 'Utilities/Thread.cpp', 'rpcs3/Emu/system_config.h') }}
+          restore-keys: |
+            ps3android-cxx-${{ env.VARIANT }}-${{ env.NDK_VERSION }}-
+
+      - name: Prepare release signing
+        if: env.VARIANT == 'release'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Release builds require KEYSTORE_BASE64, KEY_ALIAS and KEYSTORE_PASSWORD secrets."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+          test -s "$RUNNER_TEMP/signing/release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/signing/release.jks" >> "$GITHUB_ENV"
+          echo "KEYSTORE_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build standard APK
+        working-directory: android
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$VARIANT" = "release" ]; then
+            task=assembleStandardRelease
+          else
+            task=assembleStandardDebug
+          fi
+          ./gradlew --no-daemon --build-cache "$task"
+
+      - name: Verify APK identity and native optimization
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(find "app/build/outputs/apk/standard/$VARIANT" -name '*.apk' | head -1)
+          test -n "$apk"
+
+          aapt=$(find "$ANDROID_SDK_ROOT/build-tools" -name aapt | sort -V | tail -1)
+          package=$("$aapt" dump badging "$apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          echo "Package: $package"
+          test "$package" = "com.ps3native.standard"
+
+          readelf=$(find "$ANDROID_NDK_HOME" -name llvm-readelf | head -1)
+          rm -rf /tmp/ps3android-apkcheck
+          mkdir -p /tmp/ps3android-apkcheck
+          unzip -o -q "$apk" 'lib/arm64-v8a/librpcs3-android.so' -d /tmp/ps3android-apkcheck
+          so=/tmp/ps3android-apkcheck/lib/arm64-v8a/librpcs3-android.so
+          test -s "$so"
+
+          text_size=$("$readelf" -S "$so" | awk '$2==".text"{print strtonum("0x"$6)}')
+          echo "Native .text size: $text_size bytes"
+          if [ "$text_size" -gt 70000000 ]; then
+            echo "::error::Native library appears to be unoptimized."
+            exit 1
+          fi
+
+      - name: Verify release signature
+        if: env.VARIANT == 'release'
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk/standard/release -name '*.apk' | head -1)
+          apksigner=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort -V | tail -1)
+          certs="$RUNNER_TEMP/apksigner-certs.txt"
+          "$apksigner" verify --print-certs "$apk" > "$certs" 2>&1
+          cat "$certs"
+          if grep -qi 'CN=Android Debug' "$certs"; then
+            echo "::error::Release APK is signed with the Android debug certificate."
+            exit 1
+          fi
+
+      - name: Generate SHA-256
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/apk"
+          apk=$(find "app/build/outputs/apk/standard/$VARIANT" -name '*.apk' | head -1)
+          cp "$apk" "$RUNNER_TEMP/apk/ps3android-standard-$VARIANT.apk"
+          cd "$RUNNER_TEMP/apk"
+          sha256sum "ps3android-standard-$VARIANT.apk" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload APK and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps3android-standard-${{ env.VARIANT }}
+          path: |
+            ${{ runner.temp }}/apk/ps3android-standard-${{ env.VARIANT }}.apk
+            ${{ runner.temp }}/apk/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
