@@ -10,6 +10,7 @@
 #include "Emu/system_config.h"
 #include "Thread.h"
 #include <cstring>
+#include <cstdlib>
 #include <cerrno>
 #include "Utilities/JIT.h"
 #include <cfenv>
